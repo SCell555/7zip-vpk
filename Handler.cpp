@@ -124,7 +124,8 @@ static constexpr const Byte kProps[] =
 	kpidPath,
 	kpidSize,
 	kpidOffset,
-	kpidVolume
+	kpidVolume,
+	kpidCRC
 };
 
 static constexpr const Byte kArcProps[] =
