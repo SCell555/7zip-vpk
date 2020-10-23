@@ -713,7 +713,7 @@ public:
 	HRESULT addItem( AString internalPath, UInt32 size, IInStream* stream )
 	{
 		internalPath.MakeLower_Ascii();
-		const std::string path{ internalPath.Ptr(), internalPath.Len() };
+		const std::string_view path{ internalPath.Ptr(), internalPath.Len() };
 		const auto spl = path.rfind( '/' );
 		for ( size_t i = 0; i < ARRAYSIZE( bannedExts ); i++ )
 		{
@@ -721,7 +721,7 @@ public:
 				return E_FAIL;
 		}
 
-		auto& dir = resolvePath( root, spl == std::string::npos ? std::string{} : path.substr( 0, spl ), {} );
+		auto& dir = resolvePath( root, spl == std::string::npos ? std::string_view{} : path.substr( 0, spl ), {} );
 		const auto& name = path.substr( spl + 1 );
 
 		dir.files.emplace( name, Dir::File{ size, stream } );
@@ -818,7 +818,7 @@ private:
 		stream->Write( string.c_str(), static_cast<UInt32>( string.size() + 1 ), nullptr );
 	}
 
-	void write_header( IOutStream* stream, UInt32 size, UInt32 treeSize )
+	static void write_header( IOutStream* stream, UInt32 size, UInt32 treeSize )
 	{
 		libvpk::meta::VPKHeader header;
 		header.signature = libvpk::meta::VPKHeader::ValidSignature;
@@ -853,7 +853,7 @@ private:
 		chobo::flat_map<std::string, FilesByFolder> files;
 	};
 
-	static Dir& resolvePath( Dir& root, const std::string& path, const std::string& name )
+	static Dir& resolvePath( Dir& root, const std::string_view& path, const std::string_view& name )
 	{
 		if ( path.empty() )
 			return root;
@@ -861,8 +861,8 @@ private:
 		const auto sep = path.find( '/' );
 		auto res = root.folders.emplace( path.substr( 0, sep ), Dir{} );
 		if ( res.second )
-			res.first->second.name = name.empty() ? res.first->first : name + '/' + res.first->first;
-		return resolvePath( res.first->second, sep == std::string::npos ? std::string{} : path.substr( sep + 1 ), res.first->second.name );
+			res.first->second.name = name.empty() ? res.first->first : std::string( name ) + '/' + res.first->first;
+		return resolvePath( res.first->second, sep == std::string::npos ? std::string_view{} : path.substr( sep + 1 ), res.first->second.name );
 	}
 
 	static void sort_files( FilesByExt& files, Dir& root, UInt32& size, UInt32& treeSize )
@@ -888,7 +888,7 @@ private:
 			sort_files( files, folder.second, size, treeSize );
 	}
 
-	CRC32_t calc_crc( Dir::File& file )
+	static CRC32_t calc_crc( Dir::File& file )
 	{
 		CRC32_t crc;
 		CRC32_Init( crc );
@@ -906,7 +906,6 @@ private:
 
 		return crc;
 	}
-
 };
 
 
