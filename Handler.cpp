@@ -860,8 +860,8 @@ private:
 		const auto sep = path.find( '/' );
 		auto res = root.folders.emplace( path.substr( 0, sep ), Dir{} );
 		if ( res.second )
-			res.first->second.name = name + '/' + res.first->first;
-		return resolvePath( res.first->second, path.substr( sep + 1 ), res.first->second.name );
+			res.first->second.name = name.empty() ? res.first->first : name + '/' + res.first->first;
+		return resolvePath( res.first->second, sep == std::string::npos ? std::string{} : path.substr( sep + 1 ), res.first->second.name );
 	}
 
 	static void sort_files( FilesByExt& files, Dir& root, UInt32& size, UInt32& treeSize )
@@ -871,7 +871,7 @@ private:
 		using namespace std::string_view_literals;
 		for ( auto& [name, file] : root.files )
 		{
-			const auto sep = name.find( '.' );
+			const auto sep = name.rfind( '.' );
 			auto r = files.files.emplace( sep != std::string::npos ? name.substr( sep + 1 ) : " "sv, FilesByExt::FilesByFolder{} );
 			auto r2 = r.first->second.files.emplace( root.name.empty() ? " "sv : root.name, std::vector<std::pair<std::string, Dir::File*>>{} );
 			r2.first->second.emplace_back( name.substr( 0, sep ), &file );
