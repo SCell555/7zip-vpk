@@ -748,17 +748,17 @@ public:
 		FilesByExt sorted_files;
 		sort_files( sorted_files, root, size, treeSize );
 
-		for ( auto& [ext, dirs] : sorted_files.files )
-			treeSize += static_cast<UInt32>( dirs.files.size() + 1 );
-		++treeSize;
+		for ( auto& [ext, dirs] : sorted_files )
+			treeSize += static_cast<UInt32>( dirs.size() + 1 ); // add null after each all files in each directory + null after last dir
+		++treeSize; // null after last ext
 
 		write_header( stream, size, treeSize );
 
 		UInt32 currentOffset = 0;
-		for ( auto& [ext, dirs] : sorted_files.files )
+		for ( auto& [ext, dirs] : sorted_files )
 		{
 			write( stream, ext );
-			for ( auto& [dir, files] : dirs.files )
+			for ( auto& [dir, files] : dirs )
 			{
 				write( stream, dir );
 				for ( auto& [file, data] : files )
@@ -785,9 +785,9 @@ public:
 
 		stream->Seek( treeSize + sizeof( libvpk::meta::VPKHeader ), STREAM_SEEK_SET, nullptr );
 
-		for ( auto& [ext, dirs] : sorted_files.files )
+		for ( auto& [ext, dirs] : sorted_files )
 		{
-			for ( auto& [dir, files] : dirs.files )
+			for ( auto& [dir, files] : dirs )
 			{
 				for ( auto& [file, data] : files )
 				{
@@ -843,15 +843,8 @@ private:
 	};
 	Dir root;
 
-	struct FilesByExt
-	{
-		struct FilesByFolder
-		{
-			chobo::flat_map<std::string, std::vector<std::pair<std::string, Dir::File*>>> files;
-		};
-
-		chobo::flat_map<std::string, FilesByFolder> files;
-	};
+	using FilesByFolder = chobo::flat_map<std::string, std::vector<std::pair<std::string, Dir::File*>>>;
+	using FilesByExt = chobo::flat_map<std::string, FilesByFolder>;
 
 	static Dir& resolvePath( Dir& root, const std::string_view& path, const std::string_view& name )
 	{
@@ -873,15 +866,15 @@ private:
 		for ( auto& [name, file] : root.files )
 		{
 			const auto sep = name.rfind( '.' );
-			auto r = files.files.emplace( sep != std::string::npos ? name.substr( sep + 1 ) : " "sv, FilesByExt::FilesByFolder{} );
-			auto r2 = r.first->second.files.emplace( root.name.empty() ? " "sv : root.name, std::vector<std::pair<std::string, Dir::File*>>{} );
+			auto r = files.emplace( sep != std::string::npos ? name.substr( sep + 1 ) : " "sv, FilesByFolder{} );
+			auto r2 = r.first->second.emplace( root.name.empty() ? " "sv : root.name, std::vector<std::pair<std::string, Dir::File*>>{} );
 			r2.first->second.emplace_back( name.substr( 0, sep ), &file );
 			size += file.size;
-			if ( r.second )
-				treeSize += static_cast<UInt32>( r.first->first.size() + 1 );
-			if ( r2.second )
-				treeSize += static_cast<UInt32>( r2.first->first.size() + 1 );
-			treeSize += static_cast<UInt32>( ( sep == std::string::npos ? name.size() : sep ) + 1 + vpkMetaSize );
+			if ( r.second ) // if new
+				treeSize += static_cast<UInt32>( r.first->first.size() + 1 ); // extension size
+			if ( r2.second ) // if new
+				treeSize += static_cast<UInt32>( r2.first->first.size() + 1 ); // directory size
+			treeSize += static_cast<UInt32>( ( sep == std::string::npos ? name.size() : sep ) + 1 + vpkMetaSize ); // file name + header
 		}
 
 		for ( auto& folder : root.folders )
