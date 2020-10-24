@@ -843,7 +843,8 @@ private:
 	};
 	Dir root;
 
-	using FilesByFolder = chobo::flat_map<std::string, std::vector<std::pair<std::string, Dir::File*>>>;
+	using SortedFiles = chobo::flat_map<std::string, Dir::File*>;
+	using FilesByFolder = chobo::flat_map<std::string, SortedFiles>;
 	using FilesByExt = chobo::flat_map<std::string, FilesByFolder>;
 
 	static Dir& resolvePath( Dir& root, const std::string_view& path, const std::string_view& name )
@@ -867,8 +868,8 @@ private:
 		{
 			const auto sep = name.rfind( '.' );
 			auto r = files.emplace( sep != std::string::npos ? name.substr( sep + 1 ) : " "sv, FilesByFolder{} );
-			auto r2 = r.first->second.emplace( root.name.empty() ? " "sv : root.name, std::vector<std::pair<std::string, Dir::File*>>{} );
-			r2.first->second.emplace_back( name.substr( 0, sep ), &file );
+			auto r2 = r.first->second.emplace( root.name.empty() ? " "sv : root.name, SortedFiles{} );
+			r2.first->second.emplace( name.substr( 0, sep ), &file );
 			size += file.size;
 			if ( r.second ) // if new
 				treeSize += static_cast<UInt32>( r.first->first.size() + 1 ); // extension size
