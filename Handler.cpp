@@ -40,7 +40,7 @@ STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPos
 {
 	try
 	{
-		vpk.open( inStream, callback );
+		RINOK( vpk.open( inStream, callback ) );
 		const auto& f = vpk.files().container();
 		int largestId = -1;
 		int preloadSize = 0;
@@ -131,6 +131,7 @@ static constexpr const Byte kProps[] =
 static constexpr const Byte kArcProps[] =
 {
 	kpidTotalPhySize,
+	kpidHeadersSize,
 	kpidNumVolumes
 };
 
@@ -148,6 +149,15 @@ STDMETHODIMP CHandler::GetArchiveProperty( PROPID propID, PROPVARIANT* value ) M
 			{
 				const auto& h = vpk.header();
 				prop = size +
+					( h.version == 1 ? sizeof( libvpk::meta::VPKHeader1 ) : sizeof( libvpk::meta::VPKHeader2 ) )
+					+ h.treeSize + h.archiveMD5SectionSize + h.otherMD5SectionSize + h.signatureSectionSize;
+				break;
+			}
+
+		case kpidHeadersSize:
+			{
+				const auto& h = vpk.header();
+				prop =
 					( h.version == 1 ? sizeof( libvpk::meta::VPKHeader1 ) : sizeof( libvpk::meta::VPKHeader2 ) )
 					+ h.treeSize + h.archiveMD5SectionSize + h.otherMD5SectionSize + h.signatureSectionSize;
 				break;
@@ -993,6 +1003,6 @@ REGISTER_ARC_IO(
 	"VPK", "vpk", 0, 1,
 	k_Signature,
 	0,
-	NArcInfoFlags::kMultiSignature | NArcInfoFlags::kUseGlobalOffset,
+	NArcInfoFlags::kMultiSignature | NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen,
 	IsArc_Vpk
 )
