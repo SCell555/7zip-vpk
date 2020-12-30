@@ -189,7 +189,10 @@ namespace libvpk
 
 			// Skip over the preload section
 			if ( desc.preloadLength != 0 )
+			{
 				stream->Seek( desc.preloadLength, STREAM_SEEK_CUR, nullptr );
+				desc.fileLength += desc.preloadLength;
+			}
 
 			m_files.emplace( vpkFilePath, desc );
 			return S_OK;
