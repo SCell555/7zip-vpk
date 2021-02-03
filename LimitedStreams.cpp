@@ -273,6 +273,21 @@ STDMETHODIMP CTailInStream::Seek(Int64 offset, UInt32 seekOrigin, UInt64 *newPos
   return Stream->Seek(Offset + _virtPos, STREAM_SEEK_SET, NULL);
 }
 
+
+STDMETHODIMP CEmptyInStream::Read(void *data, UInt32 size, UInt32 *processedSize)
+{
+  if (processedSize)
+    *processedSize = 0;
+  return S_OK;
+}
+
+STDMETHODIMP CEmptyInStream::Seek(Int64 offset, UInt32 seekOrigin, UInt64 *newPosition)
+{
+  if (newPosition)
+    *newPosition = 0;
+  return S_OK;
+}
+
 STDMETHODIMP CLimitedCachedInStream::Read(void *data, UInt32 size, UInt32 *processedSize)
 {
   if (processedSize)

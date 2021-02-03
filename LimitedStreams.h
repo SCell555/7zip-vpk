@@ -180,6 +180,17 @@ public:
   HRESULT SeekToStart() { return Stream->Seek(Offset, STREAM_SEEK_SET, NULL); }
 };
 
+class CEmptyInStream:
+  public IInStream,
+  public CMyUnknownImp
+{
+public:
+  MY_UNKNOWN_IMP2(ISequentialInStream, IInStream)
+
+  STDMETHOD(Read)(void *data, UInt32 size, UInt32 *processedSize);
+  STDMETHOD(Seek)(Int64 offset, UInt32 seekOrigin, UInt64 *newPosition);
+};
+
 class CLimitedCachedInStream:
   public IInStream,
   public CMyUnknownImp

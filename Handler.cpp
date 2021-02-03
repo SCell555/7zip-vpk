@@ -255,6 +255,14 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 			if ( !testMode && !realOutStream )
 				continue;
 
+			if ( !item.fileLength )
+			{
+				RINOK( extractCallback->PrepareOperation( askMode ) );
+				realOutStream->Write( "", 0, nullptr );
+				RINOK( extractCallback->SetOperationResult( NArchive::NExtract::NOperationResult::kOK ) );
+				continue;
+			}
+
 			RINOK( extractCallback->PrepareOperation( askMode ) );
 			outStreamSpec->SetStream( realOutStream );
 			realOutStream.Release();
@@ -282,6 +290,13 @@ STDMETHODIMP CHandler::GetStream( UInt32 index, ISequentialInStream** stream )
 {
 	*stream = 0;
 	const auto& i = vpk.files().container().at( index ).second;
+
+	if ( !i.fileLength )
+	{
+		*stream = new CEmptyInStream();
+		( *stream )->AddRef();
+		return S_OK;
+	}
 
 	const auto& h = vpk.header();
 	const auto offset = i.fileOffset + ( i.archiveIdx != 0x7FFF ? 0 : h.treeSize + ( h.version == 1 ? sizeof( libvpk::meta::VPKHeader1 ) : sizeof( libvpk::meta::VPKHeader ) ) );

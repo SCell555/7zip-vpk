@@ -22,12 +22,12 @@ namespace libvpk
 		template <>
 		std::string read<std::string>( IInStream* stream )
 		{
-			std::string value;
+			std::vector<char> value;
 			char ch;
 			UInt32 s;
 			while ( stream->Read( &ch, sizeof( char ), &s ) == S_OK && s == sizeof( char ) && ch != '\0' )
-				value += ch;
-			return value;
+				value.emplace_back( ch );
+			return { value.cbegin(), value.cend() };
 		}
 
 		class NonCopyable
