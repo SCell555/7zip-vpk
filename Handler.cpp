@@ -33,6 +33,7 @@ private:
 	CMyComPtr<IInStream> basePak;
 	CObjectVector<CMyComPtr<IInStream>> paks;
 	UInt64 size = 0;
+	bool missingFiles = false;
 };
 
 STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPosition, IArchiveOpenCallback* callback ) MY_NO_THROW_DECL_ONLY
@@ -83,9 +84,9 @@ STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPos
 			{
 				swprintf_s( base, L"%s%03d.vpk", name.GetBuf(), i );
 
-				IInStream* s;
+				CMyComPtr<IInStream> s;
 				if ( volCallback->GetStream( base, &s ) != S_OK || s == nullptr )
-					return ERROR_FILE_NOT_FOUND;
+					missingFiles = true;
 				paks.Add( s );
 			}
 		}
@@ -118,20 +119,24 @@ STDMETHODIMP CHandler::GetNumberOfItems( UInt32* numItems ) MY_NO_THROW_DECL_ONL
 }
 
 
-static constexpr const Byte kProps[] =
+static constexpr const PROPID kProps[] =
 {
 	kpidPath,
 	kpidSize,
-	kpidOffset,
+	kpidCRC,
 	kpidVolume,
-	kpidCRC
+	kpidOffset
 };
 
-static constexpr const Byte kArcProps[] =
+static constexpr const PROPID kArcProps[] =
 {
-	kpidTotalPhySize,
+	kpidUnpackVer,
+	kpidIsVolume,
+	kpidNumVolumes,
 	kpidHeadersSize,
-	kpidNumVolumes
+	kpidWarning,
+	kpidTotalPhySize,
+	kpidReadOnly
 };
 
 IMP_IInArchive_Props
@@ -165,6 +170,20 @@ STDMETHODIMP CHandler::GetArchiveProperty( PROPID propID, PROPVARIANT* value ) M
 		case kpidNumVolumes:
 			prop = static_cast<UInt32>( paks.Size() );
 			break;
+		case kpidUnpackVer:
+			prop = static_cast<UInt32>( vpk.header().version );
+			break;
+		case kpidReadOnly:
+			prop = true;
+			break;
+		case kpidIsVolume:
+			if ( !paks.IsEmpty() )
+				prop = true;
+			break;
+		case kpidWarning:
+			if ( missingFiles )
+				prop = "Missing vpk files!";
+			break;
 		}
 		prop.Detach( value );
 		return S_OK;
@@ -182,7 +201,6 @@ STDMETHODIMP CHandler::GetProperty( UInt32 index, PROPID propID, PROPVARIANT* va
 		case kpidPath:
 			prop = MultiByteToUnicodeString( i.first.c_str(), CP_ACP );
 			break;
-		//case kpidIsDir:
 		case kpidSize:
 		case kpidPackSize:
 			prop = static_cast<UInt64>( item.fileLength );
@@ -254,6 +272,14 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 				RINOK( extractCallback->PrepareOperation( askMode ) );
 				realOutStream->Write( "", 0, nullptr );
 				RINOK( extractCallback->SetOperationResult( NArchive::NExtract::NOperationResult::kOK ) );
+				continue;
+			}
+
+			if ( missingFiles && !paks[item.archiveIdx] )
+			{
+				RINOK( extractCallback->PrepareOperation( askMode ) );
+				realOutStream.Release();
+				RINOK( extractCallback->SetOperationResult( NArchive::NExtract::NOperationResult::kUnavailable ) );
 				continue;
 			}
 
@@ -748,16 +774,15 @@ public:
 
 	HRESULT write_pak( ISequentialOutStream* outStream, IArchiveUpdateCallback* callback )
 	{
-		CLocalProgress* lps = new CLocalProgress;
-		CMyComPtr<ICompressProgressInfo> progress = lps;
-		lps->Init( callback, true );
+		CMyComPtr<CLocalProgress> progress = new CLocalProgress;
+		progress->Init( callback, true );
 
 		CMyComPtr<ICompressCoder> copyCoder = new NCompress::CCopyCoder;
 
 		CMyComPtr<IOutStream> stream_;
 		RINOK( outStream->QueryInterface( IID_IOutStream, (void**)&stream_ ) );
 
-		CCacheOutStream* stream = new CCacheOutStream();
+		CMyComPtr<CCacheOutStream> stream = new CCacheOutStream();
 		if ( !stream->Allocate() )
 			return E_OUTOFMEMORY;
 		RINOK( stream->Init( outStream, stream_ ) );
@@ -783,8 +808,8 @@ public:
 				{
 					UInt64 pos;
 					RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
-					lps->InSize = lps->OutSize = pos;
-					RINOK( lps->SetCur() );
+					progress->InSize = progress->OutSize = pos;
+					RINOK( progress->SetCur() );
 					RINOK( write( stream, file ) );
 					RINOK( write<UInt32>( stream, calc_crc( *data ) ) );
 					RINOK( write<UInt16>( stream, 0 ) );
@@ -811,8 +836,8 @@ public:
 				{
 					UInt64 pos;
 					RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
-					lps->InSize = lps->OutSize = pos;
-					RINOK( lps->SetCur() );
+					progress->InSize = progress->OutSize = pos;
+					RINOK( progress->SetCur() );
 					RINOK( copyCoder->Code( data->stream, stream, NULL, NULL, progress ) );
 					data->stream->Release();
 				}
@@ -820,8 +845,6 @@ public:
 		}
 
 		RINOK( stream->FlushCache() );
-		stream->Release();
-
 		return S_OK;
 	}
 
@@ -969,7 +992,7 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 			if ( !fileInStream )
 				return E_FAIL;
 
-			IInStream* inStream;
+			CMyComPtr<IInStream> inStream;
 			RINOK( fileInStream->QueryInterface( IID_IInStream, (void**)&inStream ) );
 			if ( !inStream )
 				return E_FAIL;
