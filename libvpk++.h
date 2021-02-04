@@ -88,20 +88,24 @@ namespace libvpk
 
 		HRESULT open( IInStream* stream, IArchiveOpenCallback* callback )
 		{
+			UInt64 pos;
+			RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
 			auto initialHeader = helpers::read<meta::VPKHeader1>( stream );
 			if ( initialHeader.signature != meta::VPKHeader1::ValidSignature )
-				return E_FAIL;
+				return S_FALSE;
 
 			if ( initialHeader.version == 1 )
 				m_header = initialHeader;
 			else if ( initialHeader.version == 2 )
 			{
 				// Return to the beginning and read a full VPK 2 ptr.
-				stream->Seek( 0, STREAM_SEEK_SET, nullptr );
+				RINOK( stream->Seek( pos, STREAM_SEEK_SET, nullptr ) );
 				m_header = helpers::read<meta::VPKHeader2>( stream );
+				if ( m_header.signature != meta::VPKHeader1::ValidSignature )
+					return S_FALSE;
 			}
 			else
-				return E_FAIL;
+				return S_FALSE;
 
 			const UInt64 total = m_header.treeSize;
 			callback->SetTotal( nullptr, &total );
@@ -145,8 +149,8 @@ namespace libvpk
 						{
 							UInt64 pos;
 							const UInt64 files = m_files.size();
-							stream->Seek( 0, STREAM_SEEK_CUR, &pos );
-							callback->SetCompleted( &files, &pos );
+							RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
+							RINOK( callback->SetCompleted( &files, &pos ) );
 						}
 
 						auto name = helpers::read<std::string>( stream );
@@ -181,16 +185,16 @@ namespace libvpk
 
 			// Read the terminator for the file info.
 			if ( helpers::read<uint16_t>( stream ) != 0xFFFF )
-				return E_FAIL;
+				return S_FALSE;
 
 			UInt64 pos;
-			stream->Seek( 0, STREAM_SEEK_CUR, &pos );
+			RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
 			VPKFileDesc desc{ archiveIndex, preloadBytes, static_cast<uint32_t>( pos ), offset, length, crc };
 
 			// Skip over the preload section
 			if ( desc.preloadLength != 0 )
 			{
-				stream->Seek( desc.preloadLength, STREAM_SEEK_CUR, nullptr );
+				RINOK( stream->Seek( desc.preloadLength, STREAM_SEEK_CUR, nullptr ) );
 				desc.fileLength += desc.preloadLength;
 			}
 

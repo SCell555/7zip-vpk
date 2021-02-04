@@ -33,7 +33,6 @@ private:
 	CMyComPtr<IInStream> basePak;
 	CObjectVector<CMyComPtr<IInStream>> paks;
 	UInt64 size = 0;
-	bool missingPak = false;
 };
 
 STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPosition, IArchiveOpenCallback* callback ) MY_NO_THROW_DECL_ONLY
@@ -60,16 +59,16 @@ STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPos
 		if ( largestId != -1 )
 		{
 			CMyComPtr<IArchiveOpenVolumeCallback> volCallback;
-			callback->QueryInterface( IID_IArchiveOpenVolumeCallback, (void**)&volCallback );
+			RINOK( callback->QueryInterface( IID_IArchiveOpenVolumeCallback, (void**)&volCallback ) );
 			if ( !volCallback )
-				return S_OK;
+				return E_FAIL;
 
 			UString name;
 			{
 				NWindows::NCOM::CPropVariant prop;
 				RINOK( volCallback->GetProperty( kpidName, &prop ) );
 				if ( prop.vt != VT_BSTR )
-					return S_OK;
+					return E_FAIL;
 				name = prop.bstrVal;
 			}
 
@@ -85,8 +84,8 @@ STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPos
 				swprintf_s( base, L"%s%03d.vpk", name.GetBuf(), i );
 
 				IInStream* s;
-				if ( volCallback->GetStream( base, &s ) == S_FALSE || s == nullptr )
-					missingPak = true;
+				if ( volCallback->GetStream( base, &s ) != S_OK || s == nullptr )
+					return ERROR_FILE_NOT_FOUND;
 				paks.Add( s );
 			}
 		}
@@ -225,31 +224,26 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 				totalSize += f[indices[i]].second.fileLength;
 		}
 
-		extractCallback->SetTotal( totalSize );
+		RINOK( extractCallback->SetTotal( totalSize ) );
 
-		CLocalProgress* lps = new CLocalProgress;
-		CMyComPtr<ICompressProgressInfo> progress = lps;
-		lps->Init( extractCallback, false );
+		CMyComPtr<CLocalProgress> progress = new CLocalProgress;
+		progress->Init( extractCallback, false );
 
-		NCompress::CCopyCoder* copyCoderSpec = new NCompress::CCopyCoder();
-		CMyComPtr<ICompressCoder> copyCoder = copyCoderSpec;
+		CMyComPtr<ICompressCoder> copyCoder = new NCompress::CCopyCoder;
+		CMyComPtr<CLimitedSequentialOutStream> outStream = new CLimitedSequentialOutStream;
 
-		CLimitedSequentialOutStream* outStreamSpec = new CLimitedSequentialOutStream;
-		CMyComPtr<ISequentialOutStream> outStream( outStreamSpec );
-
+		const Int32 askMode = testMode ? NArchive::NExtract::NAskMode::kTest : NArchive::NExtract::NAskMode::kExtract;
 		UInt64 currentTotalSize = 0;
 		for ( UInt32 i = 0; i < numItems; i++ )
 		{
-			lps->InSize = lps->OutSize = currentTotalSize;
-			RINOK( lps->SetCur() );
+			progress->InSize = progress->OutSize = currentTotalSize;
+			RINOK( progress->SetCur() );
 			CMyComPtr<ISequentialOutStream> realOutStream;
-			Int32 askMode = testMode ? NArchive::NExtract::NAskMode::kTest : NArchive::NExtract::NAskMode::kExtract;
 			UInt32 index = allFilesMode ? i : indices[i];
 
 			RINOK( extractCallback->GetStream( index, &realOutStream, askMode ) );
 
 			const auto& item = f[index].second;
-
 			currentTotalSize += item.fileLength;
 
 			if ( !testMode && !realOutStream )
@@ -264,9 +258,9 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 			}
 
 			RINOK( extractCallback->PrepareOperation( askMode ) );
-			outStreamSpec->SetStream( realOutStream );
+			outStream->SetStream( realOutStream );
 			realOutStream.Release();
-			outStreamSpec->Init( item.fileLength );
+			outStream->Init( item.fileLength );
 			Int32 opRes;
 			CMyComPtr<ISequentialInStream> inStream;
 			HRESULT res = GetStream( index, &inStream );
@@ -277,9 +271,9 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 			else
 			{
 				RINOK( copyCoder->Code( inStream, outStream, NULL, NULL, progress ) );
-				opRes = outStreamSpec->IsFinishedOK() ? NArchive::NExtract::NOperationResult::kOK : NArchive::NExtract::NOperationResult::kDataError;
+				opRes = outStream->IsFinishedOK() ? NArchive::NExtract::NOperationResult::kOK : NArchive::NExtract::NOperationResult::kDataError;
 			}
-			outStreamSpec->ReleaseStream();
+			outStream->ReleaseStream();
 			RINOK( extractCallback->SetOperationResult( opRes ) );
 		}
 		return S_OK;
@@ -303,19 +297,18 @@ STDMETHODIMP CHandler::GetStream( UInt32 index, ISequentialInStream** stream )
 	if ( i.preloadLength == 0 )
 		return CreateLimitedInStream( i.archiveIdx == 0x7FFF ? basePak : paks[i.archiveIdx], offset, i.fileLength, stream );
 
-	CLimitedCachedInStream* limitedStreamSpec = new CLimitedCachedInStream;
-	CMyComPtr<IInStream> limitedStream = limitedStreamSpec;
-	limitedStreamSpec->SetStream( i.archiveIdx == 0x7FFF ? basePak : paks[i.archiveIdx], offset );
+	CMyComPtr<CLimitedCachedInStream> limitedStream = new CLimitedCachedInStream;
+	limitedStream->SetStream( i.archiveIdx == 0x7FFF ? basePak : paks[i.archiveIdx], offset );
 
-	auto& preload = limitedStreamSpec->Buffer;
+	auto& preload = limitedStream->Buffer;
 	preload.Alloc( i.preloadLength );
 
 	size_t size = i.preloadLength;
-	basePak->Seek( i.preloadOffset, STREAM_SEEK_SET, nullptr );
-	ReadStream( basePak, preload, &size );
+	RINOK( basePak->Seek( i.preloadOffset, STREAM_SEEK_SET, nullptr ) );
+	RINOK( ReadStream( basePak, preload, &size ) );
 
-	limitedStreamSpec->SetCache( i.preloadLength, 0 );
-	limitedStreamSpec->InitAndSeek( 0, i.fileLength );
+	limitedStream->SetCache( i.preloadLength, 0 );
+	RINOK( limitedStream->InitAndSeek( 0, i.fileLength ) );
 	*stream = limitedStream.Detach();
 	return S_OK;
 }
@@ -753,21 +746,21 @@ public:
 		return S_OK;
 	}
 
-	void write_pak( ISequentialOutStream* outStream, IArchiveUpdateCallback* callback )
+	HRESULT write_pak( ISequentialOutStream* outStream, IArchiveUpdateCallback* callback )
 	{
 		CLocalProgress* lps = new CLocalProgress;
 		CMyComPtr<ICompressProgressInfo> progress = lps;
 		lps->Init( callback, true );
 
-		NCompress::CCopyCoder* copyCoderSpec = new NCompress::CCopyCoder();
-		CMyComPtr<ICompressCoder> copyCoder = copyCoderSpec;
+		CMyComPtr<ICompressCoder> copyCoder = new NCompress::CCopyCoder;
 
 		CMyComPtr<IOutStream> stream_;
-		outStream->QueryInterface( IID_IOutStream, (void**)&stream_ );
+		RINOK( outStream->QueryInterface( IID_IOutStream, (void**)&stream_ ) );
 
 		CCacheOutStream* stream = new CCacheOutStream();
-		stream->Allocate();
-		stream->Init( outStream, stream_ );
+		if ( !stream->Allocate() )
+			return E_OUTOFMEMORY;
+		RINOK( stream->Init( outStream, stream_ ) );
 
 		UInt32 size = 0, treeSize = 0;
 		FilesByExt sorted_files;
@@ -777,38 +770,38 @@ public:
 			treeSize += static_cast<UInt32>( dirs.size() + 1 ); // add null after each all files in each directory + null after last dir
 		++treeSize; // null after last ext
 
-		write_header( stream, size, treeSize );
+		RINOK( write_header( stream, size, treeSize ) );
 
 		UInt32 currentOffset = 0;
 		for ( auto& [ext, dirs] : sorted_files )
 		{
-			write( stream, ext );
+			RINOK( write( stream, ext ) );
 			for ( auto& [dir, files] : dirs )
 			{
-				write( stream, dir );
+				RINOK( write( stream, dir ) );
 				for ( auto& [file, data] : files )
 				{
 					UInt64 pos;
-					stream->Seek( 0, STREAM_SEEK_CUR, &pos );
+					RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
 					lps->InSize = lps->OutSize = pos;
-					lps->SetCur();
-					write( stream, file );
-					write<UInt32>( stream, calc_crc( *data ) );
-					write<UInt16>( stream, 0 );
-					write<UInt16>( stream, 0x7FFF );
-					write<UInt32>( stream, currentOffset );
-					write<UInt32>( stream, data->size );
-					write<UInt16>( stream, 0xFFFF );
+					RINOK( lps->SetCur() );
+					RINOK( write( stream, file ) );
+					RINOK( write<UInt32>( stream, calc_crc( *data ) ) );
+					RINOK( write<UInt16>( stream, 0 ) );
+					RINOK( write<UInt16>( stream, 0x7FFF ) );
+					RINOK( write<UInt32>( stream, currentOffset ) );
+					RINOK( write<UInt32>( stream, data->size ) );
+					RINOK( write<UInt16>( stream, 0xFFFF ) );
 					currentOffset += data->size;
 
 				}
-				write<std::string>( stream, {} );
+				RINOK( write<std::string>( stream, {} ) );
 			}
-			write<std::string>( stream, {} );
+			RINOK( write<std::string>( stream, {} ) );
 		}
-		write<std::string>( stream, {} );
+		RINOK( write<std::string>( stream, {} ) );
 
-		stream->Seek( treeSize + sizeof( libvpk::meta::VPKHeader ), STREAM_SEEK_SET, nullptr );
+		RINOK( stream->Seek( treeSize + sizeof( libvpk::meta::VPKHeader ), STREAM_SEEK_SET, nullptr ) );
 
 		for ( auto& [ext, dirs] : sorted_files )
 		{
@@ -817,33 +810,35 @@ public:
 				for ( auto& [file, data] : files )
 				{
 					UInt64 pos;
-					stream->Seek( 0, STREAM_SEEK_CUR, &pos );
+					RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
 					lps->InSize = lps->OutSize = pos;
-					lps->SetCur();
-					copyCoder->Code( data->stream, stream, NULL, NULL, progress );
+					RINOK( lps->SetCur() );
+					RINOK( copyCoder->Code( data->stream, stream, NULL, NULL, progress ) );
 					data->stream->Release();
 				}
 			}
 		}
 
-		stream->FlushCache();
+		RINOK( stream->FlushCache() );
 		stream->Release();
+
+		return S_OK;
 	}
 
 private:
 	template <typename T>
-	void write( IOutStream* stream, const T& data )
+	HRESULT write( IOutStream* stream, const T& data )
 	{
-		stream->Write( &data, sizeof( T ), nullptr );
+		return stream->Write( &data, sizeof( T ), nullptr );
 	}
 
 	template <>
-	void write<std::string>( IOutStream* stream, const std::string& string )
+	HRESULT write<std::string>( IOutStream* stream, const std::string& string )
 	{
-		stream->Write( string.c_str(), static_cast<UInt32>( string.size() + 1 ), nullptr );
+		return stream->Write( string.c_str(), static_cast<UInt32>( string.size() + 1 ), nullptr );
 	}
 
-	static void write_header( IOutStream* stream, UInt32 size, UInt32 treeSize )
+	static HRESULT write_header( IOutStream* stream, UInt32 size, UInt32 treeSize )
 	{
 		libvpk::meta::VPKHeader header;
 		header.signature = libvpk::meta::VPKHeader::ValidSignature;
@@ -851,7 +846,7 @@ private:
 		header.treeSize = static_cast<Int32>( treeSize );
 		header.fileDataSectionSize = static_cast<Int32>( size );
 
-		stream->Write( &header, sizeof( header ), nullptr );
+		return stream->Write( &header, sizeof( header ), nullptr );
 	}
 
 	struct Dir
@@ -970,19 +965,19 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 			UInt64 size = prop.uhVal.QuadPart;
 
 			CMyComPtr<ISequentialInStream> fileInStream;
-			callback->GetStream( i, &fileInStream );
+			RINOK( callback->GetStream( i, &fileInStream ) );
 			if ( !fileInStream )
 				return E_FAIL;
 
 			IInStream* inStream;
-			fileInStream->QueryInterface( IID_IInStream, (void**)&inStream );
+			RINOK( fileInStream->QueryInterface( IID_IInStream, (void**)&inStream ) );
 			if ( !inStream )
 				return E_FAIL;
 
 			RINOK( writer.addItem( UnicodeStringToMultiByte( name ), static_cast<UInt32>( size ), inStream ) );
 		}
 
-		writer.write_pak( outStream, callback );
+		RINOK( writer.write_pak( outStream, callback ) );
 
 		RINOK( callback->SetOperationResult( NArchive::NExtract::NOperationResult::kOK ) );
 
