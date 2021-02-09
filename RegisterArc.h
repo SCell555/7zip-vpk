@@ -11,6 +11,7 @@ struct CArcInfo
   Byte Id;
   Byte SignatureSize;
   UInt16 SignatureOffset;
+  UInt32 LevelMask;
 
   const Byte *Signature;
   const char *Name;
@@ -39,39 +40,39 @@ void RegisterArc(const CArcInfo *arcInfo) throw();
   #define IMP_CreateArcOut static IOutArchive *CreateArcOut() { return new CHandler(); }
 #endif
 
-#define REGISTER_ARC_V(n, e, ae, id, sigSize, sig, offs, flags, crIn, crOut, isArc) \
-  static const CArcInfo g_ArcInfo = { flags, id, sigSize, offs, sig, n, e, ae, crIn, crOut, isArc } ; \
+#define REGISTER_ARC_V(n, e, ae, id, sigSize, sig, offs, flags, crIn, crOut, isArc, mask) \
+  static const CArcInfo g_ArcInfo = { flags, id, sigSize, offs, mask, sig, n, e, ae, crIn, crOut, isArc } ; \
 
-#define REGISTER_ARC_R(n, e, ae, id, sigSize, sig, offs, flags, crIn, crOut, isArc) \
-  REGISTER_ARC_V(n, e, ae, id, sigSize, sig, offs, flags, crIn, crOut, isArc) \
+#define REGISTER_ARC_R(n, e, ae, id, sigSize, sig, offs, flags, crIn, crOut, isArc, mask) \
+  REGISTER_ARC_V(n, e, ae, id, sigSize, sig, offs, flags, crIn, crOut, isArc, mask) \
   struct CRegisterArc { CRegisterArc() { RegisterArc(&g_ArcInfo); }}; \
   static CRegisterArc g_RegisterArc;
 
 
-#define REGISTER_ARC_I_CLS(cls, n, e, ae, id, sig, offs, flags, isArc) \
+#define REGISTER_ARC_I_CLS(cls, n, e, ae, id, sig, offs, flags, isArc, mask) \
   IMP_CreateArcIn_2(cls) \
-  REGISTER_ARC_R(n, e, ae, id, ARRAYSIZE(sig), sig, offs, flags, CreateArc, NULL, isArc)
+  REGISTER_ARC_R(n, e, ae, id, ARRAYSIZE(sig), sig, offs, flags, CreateArc, NULL, isArc, mask)
 
-#define REGISTER_ARC_I_CLS_NO_SIG(cls, n, e, ae, id, offs, flags, isArc) \
+#define REGISTER_ARC_I_CLS_NO_SIG(cls, n, e, ae, id, offs, flags, isArc, mask) \
   IMP_CreateArcIn_2(cls) \
-  REGISTER_ARC_R(n, e, ae, id, 0, NULL, offs, flags, CreateArc, NULL, isArc)
+  REGISTER_ARC_R(n, e, ae, id, 0, NULL, offs, flags, CreateArc, NULL, isArc, mask)
 
-#define REGISTER_ARC_I(n, e, ae, id, sig, offs, flags, isArc) \
-  REGISTER_ARC_I_CLS(CHandler(), n, e, ae, id, sig, offs, flags, isArc)
+#define REGISTER_ARC_I(n, e, ae, id, sig, offs, flags, isArc, mask) \
+  REGISTER_ARC_I_CLS(CHandler(), n, e, ae, id, sig, offs, flags, isArc, mask)
 
-#define REGISTER_ARC_I_NO_SIG(n, e, ae, id, offs, flags, isArc) \
-  REGISTER_ARC_I_CLS_NO_SIG(CHandler(), n, e, ae, id, offs, flags, isArc)
+#define REGISTER_ARC_I_NO_SIG(n, e, ae, id, offs, flags, isArc, mask) \
+  REGISTER_ARC_I_CLS_NO_SIG(CHandler(), n, e, ae, id, offs, flags, isArc, mask)
 
 
-#define REGISTER_ARC_IO(n, e, ae, id, sig, offs, flags, isArc) \
+#define REGISTER_ARC_IO(n, e, ae, id, sig, offs, flags, isArc, mask) \
   IMP_CreateArcIn \
   IMP_CreateArcOut \
-  REGISTER_ARC_R(n, e, ae, id, ARRAYSIZE(sig), sig, offs, flags, CreateArc, CreateArcOut, isArc)
+  REGISTER_ARC_R(n, e, ae, id, ARRAYSIZE(sig), sig, offs, flags, CreateArc, CreateArcOut, isArc, mask)
 
-#define REGISTER_ARC_IO_DECREMENT_SIG(n, e, ae, id, sig, offs, flags, isArc) \
+#define REGISTER_ARC_IO_DECREMENT_SIG(n, e, ae, id, sig, offs, flags, isArc, mask) \
   IMP_CreateArcIn \
   IMP_CreateArcOut \
-  REGISTER_ARC_V(n, e, ae, id, ARRAYSIZE(sig), sig, offs, flags, CreateArc, CreateArcOut, isArc) \
+  REGISTER_ARC_V(n, e, ae, id, ARRAYSIZE(sig), sig, offs, flags, CreateArc, CreateArcOut, isArc, mask) \
   struct CRegisterArcDecSig { CRegisterArcDecSig() { sig[0]--; RegisterArc(&g_ArcInfo); }}; \
   static CRegisterArcDecSig g_RegisterArc;
 

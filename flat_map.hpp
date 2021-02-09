@@ -169,7 +169,7 @@ public:
         m_container = x.m_container;
         return *this;
     }
-    flat_map& operator=(flat_map&& x)
+    flat_map& operator=(flat_map&& x) noexcept
     {
         m_cmp = std::move(x.m_cmp);
         m_container = std::move(x.m_container);

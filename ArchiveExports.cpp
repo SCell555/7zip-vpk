@@ -144,3 +144,12 @@ STDAPI GetIsArc( UInt32 formatIndex, Func_IsArc* isArc )
     *isArc = g_Arcs[formatIndex]->IsArc;
     return S_OK;
 }
+
+STDAPI GetFormatLevelMask(UInt32 formatIndex, UInt32 *mask)
+{
+    *mask = -1;
+    if ( formatIndex >= g_NumArcs )
+        return E_INVALIDARG;
+    *mask = g_Arcs[formatIndex]->LevelMask;
+    return S_OK;
+}

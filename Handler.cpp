@@ -18,15 +18,16 @@
 
 class CHandler :
 	public IInArchive, public IInArchiveGetStream, // reading
-	public IOutArchive, public ISetProperties, // writing
+	public IOutArchive, public ISetProperties, public IMultiVolumeOutArchive, // writing
 	public CMyUnknownImp
 {
-	MY_UNKNOWN_IMP4( IInArchive, IInArchiveGetStream, IOutArchive, ISetProperties )
+	MY_UNKNOWN_IMP5( IInArchive, IInArchiveGetStream, IOutArchive, ISetProperties, IMultiVolumeOutArchive )
 	INTERFACE_IInArchive( override )
 	INTERFACE_IOutArchive( override )
 
 	STDMETHOD( GetStream )( UInt32 index, ISequentialInStream** stream ) override;
 	STDMETHOD( SetProperties )( const wchar_t* const* names, const PROPVARIANT* values, UInt32 numProps ) override;
+	STDMETHOD( GetMultiArchiveNameFmt )( PROPVARIANT* nameMod, PROPVARIANT* prefix, PROPVARIANT* postfix, BOOL* numberAfterExt, UInt32* digitCount ) override;
 
 private:
 	libvpk::VPKSet vpk;
@@ -79,6 +80,8 @@ STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPos
 			auto end = name.ReverseFind_Dot();
 			if ( end > 3 && name[end - 1] == L'r' && name[end - 2] == L'i' && name[end - 3] == L'd' )
 				name.DeleteFrom( end - 3 );
+			else
+				name += '_';
 
 			for ( int i = 0; i < largestId + 1; i++ )
 			{
@@ -296,7 +299,7 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 				opRes = NArchive::NExtract::NOperationResult::kDataError;
 			else
 			{
-				RINOK( copyCoder->Code( inStream, outStream, NULL, NULL, progress ) );
+				RINOK( copyCoder->Code( inStream, outStream, nullptr, nullptr, progress ) );
 				opRes = outStream->IsFinishedOK() ? NArchive::NExtract::NOperationResult::kOK : NArchive::NExtract::NOperationResult::kDataError;
 			}
 			outStream->ReleaseStream();
@@ -308,8 +311,11 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 
 STDMETHODIMP CHandler::GetStream( UInt32 index, ISequentialInStream** stream )
 {
-	*stream = 0;
+	*stream = nullptr;
 	const auto& i = vpk.files().container().at( index ).second;
+
+	if ( missingFiles && !paks[i.archiveIdx] )
+		return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
 
 	if ( !i.fileLength )
 	{
@@ -542,7 +548,7 @@ class CCacheOutStream : public IOutStream, public CMyUnknownImp
 		return MyWrite( kCacheBlockSize - ( (size_t)_cachedPos & ( kCacheBlockSize - 1 ) ) );
 	}
 public:
-	CCacheOutStream() : _cache( NULL ) {}
+	CCacheOutStream() : _cache( nullptr ) {}
 	~CCacheOutStream();
 	bool Allocate();
 	HRESULT Init( ISequentialOutStream* seqStream, IOutStream* stream );
@@ -559,7 +565,7 @@ bool CCacheOutStream::Allocate()
 {
 	if ( !_cache )
 		_cache = ( Byte* )::MidAlloc( kCacheSize );
-	return _cache != NULL;
+	return _cache != nullptr;
 }
 
 HRESULT CCacheOutStream::Init( ISequentialOutStream* seqStream, IOutStream* stream )
@@ -619,7 +625,7 @@ CCacheOutStream::~CCacheOutStream()
 		if ( _virtSize != _phySize )
 			_stream->SetSize( _virtSize );
 		if ( _virtPos != _phyPos )
-			_stream->Seek( _virtPos, STREAM_SEEK_SET, NULL );
+			_stream->Seek( _virtPos, STREAM_SEEK_SET, nullptr );
 	}
 	::MidFree( _cache );
 }
@@ -746,7 +752,12 @@ STDMETHODIMP CCacheOutStream::SetSize( UInt64 newSize )
 
 static constexpr std::string_view bannedExts[] =
 {
-	".bat", ".cmd", ".com", ".dll", ".exe", ".msi", ".rar", ".reg", ".zip", ".so"
+	".bat", ".cmd", ".com", ".dll", ".exe", ".msi", ".rar", ".reg", ".zip", ".tar", ".gz", ".tgz", ".so", ".vpk"
+};
+
+static constexpr std::string_view standardDirs[] =
+{
+	"cfg", "expressions", "maps", "materials", "media", "missions", "models", "panorama", "particles", "resource", "scenes", "scripts", "sound"
 };
 
 class VpkWriter
@@ -758,21 +769,19 @@ public:
 	{
 		internalPath.MakeLower_Ascii();
 		const std::string_view path{ internalPath.Ptr(), internalPath.Len() };
-		const auto spl = path.rfind( '/' );
-		for ( size_t i = 0; i < ARRAYSIZE( bannedExts ); i++ )
-		{
-			if ( path.find( bannedExts[i] ) != std::string::npos )
+		for ( size_t i = 0; i < ARRAYSIZE( bannedExts ); ++i )
+			if ( path.ends_with( bannedExts[i] ) )
 				return E_FAIL;
-		}
 
+		const auto spl = path.rfind( '/' );
 		auto& dir = resolvePath( root, spl == std::string::npos ? std::string_view{} : path.substr( 0, spl ), {} );
 		const auto& name = path.substr( spl + 1 );
 
-		dir.files.emplace( name, Dir::File{ size, stream } );
+		dir.files.emplace( name, Dir::File{ size, 0, stream } );
 		return S_OK;
 	}
 
-	HRESULT write_pak( ISequentialOutStream* outStream, IArchiveUpdateCallback* callback )
+	HRESULT writePak( ISequentialOutStream* outStream, IArchiveUpdateCallback2* callback, UInt64 volSize )
 	{
 		CMyComPtr<CLocalProgress> progress = new CLocalProgress;
 		progress->Init( callback, true );
@@ -787,16 +796,38 @@ public:
 			return E_OUTOFMEMORY;
 		RINOK( stream->Init( outStream, stream_ ) );
 
+		if ( root.files.empty() && root.folders.size() == 1 )
+		{
+			auto& realRoot = root.folders.modify_container().at( 0 );
+			for ( size_t i = 0; i < ARRAYSIZE( standardDirs ); ++i )
+			{
+				if ( realRoot.first == standardDirs[i] )
+					goto dont;
+			}
+
+			chobo::flat_map<std::string, Dir> rootFolders = std::move( realRoot.second.folders );
+			chobo::flat_map<std::string, Dir::File> rootFiles = std::move( realRoot.second.files );
+
+			root.folders.clear();
+
+			root.folders = std::move( rootFolders );
+			root.files = std::move( rootFiles );
+
+			recurseRemoveRootName( root );
+		}
+	dont:
+
 		UInt32 size = 0, treeSize = 0;
 		FilesByExt sorted_files;
-		sort_files( sorted_files, root, size, treeSize );
+		sortFiles( sorted_files, root, size, treeSize );
 
 		for ( auto& [ext, dirs] : sorted_files )
 			treeSize += static_cast<UInt32>( dirs.size() + 1 ); // add null after each all files in each directory + null after last dir
 		++treeSize; // null after last ext
 
-		RINOK( write_header( stream, size, treeSize ) );
+		RINOK( writeHeader( stream, size, treeSize ) );
 
+		UInt16 curPak = volSize > 0 ? 0 : 0x7FFF;
 		UInt32 currentOffset = 0;
 		for ( auto& [ext, dirs] : sorted_files )
 		{
@@ -811,14 +842,20 @@ public:
 					progress->InSize = progress->OutSize = pos;
 					RINOK( progress->SetCur() );
 					RINOK( write( stream, file ) );
-					RINOK( write<UInt32>( stream, calc_crc( *data ) ) );
+					RINOK( write<UInt32>( stream, calcCrc( *data ) ) );
 					RINOK( write<UInt16>( stream, 0 ) );
-					RINOK( write<UInt16>( stream, 0x7FFF ) );
+					RINOK( write<UInt16>( stream, curPak ) );
 					RINOK( write<UInt32>( stream, currentOffset ) );
 					RINOK( write<UInt32>( stream, data->size ) );
 					RINOK( write<UInt16>( stream, 0xFFFF ) );
 					currentOffset += data->size;
+					data->pak = curPak;
 
+					if ( volSize && currentOffset > volSize )
+					{
+						currentOffset = 0;
+						++curPak;
+					}
 				}
 				RINOK( write<std::string>( stream, {} ) );
 			}
@@ -828,18 +865,48 @@ public:
 
 		RINOK( stream->Seek( treeSize + sizeof( libvpk::meta::VPKHeader ), STREAM_SEEK_SET, nullptr ) );
 
-		for ( auto& [ext, dirs] : sorted_files )
+		if ( !volSize )
 		{
-			for ( auto& [dir, files] : dirs )
+			for ( auto& [ext, dirs] : sorted_files )
 			{
-				for ( auto& [file, data] : files )
+				for ( auto& [dir, files] : dirs )
 				{
-					UInt64 pos;
-					RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
-					progress->InSize = progress->OutSize = pos;
-					RINOK( progress->SetCur() );
-					RINOK( copyCoder->Code( data->stream, stream, NULL, NULL, progress ) );
-					data->stream->Release();
+					for ( auto& [file, data] : files )
+					{
+						UInt64 pos;
+						RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
+						progress->InSize = progress->OutSize = pos;
+						RINOK( progress->SetCur() );
+						RINOK( copyCoder->Code( data->stream, stream, nullptr, nullptr, progress ) );
+						data->stream.Release();
+					}
+				}
+			}
+		}
+		else
+		{
+			CMyComPtr<ISequentialOutStream> pakStream;
+			UInt16 lastPak = 0xFFFF;
+			UInt32 written = 0;
+			for ( auto& [ext, dirs] : sorted_files )
+			{
+				for ( auto& [dir, files] : dirs )
+				{
+					for ( auto& [file, data] : files )
+					{
+						if ( lastPak != data->pak )
+						{
+							lastPak = data->pak;
+							pakStream.Release();
+							RINOK( callback->GetVolumeStream( static_cast<UInt32>( lastPak - 1 ), &pakStream ) );
+						}
+
+						progress->InSize = progress->OutSize = written;
+						written += data->size;
+						RINOK( progress->SetCur() );
+						RINOK( copyCoder->Code( data->stream, pakStream, nullptr, nullptr, progress ) );
+						data->stream.Release();
+					}
 				}
 			}
 		}
@@ -861,7 +928,7 @@ private:
 		return stream->Write( string.c_str(), static_cast<UInt32>( string.size() + 1 ), nullptr );
 	}
 
-	static HRESULT write_header( IOutStream* stream, UInt32 size, UInt32 treeSize )
+	static HRESULT writeHeader( IOutStream* stream, UInt32 size, UInt32 treeSize )
 	{
 		libvpk::meta::VPKHeader header;
 		header.signature = libvpk::meta::VPKHeader::ValidSignature;
@@ -877,6 +944,7 @@ private:
 		struct File
 		{
 			UInt32 size = 0;
+			UInt16 pak = 0;
 			CMyComPtr<IInStream> stream;
 		};
 
@@ -902,7 +970,16 @@ private:
 		return resolvePath( res.first->second, sep == std::string::npos ? std::string_view{} : path.substr( sep + 1 ), res.first->second.name );
 	}
 
-	static void sort_files( FilesByExt& files, Dir& root, UInt32& size, UInt32& treeSize )
+	static void recurseRemoveRootName( Dir& root )
+	{
+		for ( auto& f : root.folders )
+		{
+			f.second.name = f.second.name.substr( f.second.name.find( '/' ) + 1 );
+			recurseRemoveRootName( f.second );
+		}
+	}
+
+	static void sortFiles( FilesByExt& files, Dir& root, UInt32& size, UInt32& treeSize )
 	{
 		constexpr const auto vpkMetaSize = 3 * sizeof( Int32 ) + 3 * sizeof( Int16 );
 
@@ -922,10 +999,10 @@ private:
 		}
 
 		for ( auto& folder : root.folders )
-			sort_files( files, folder.second, size, treeSize );
+			sortFiles( files, folder.second, size, treeSize );
 	}
 
-	static CRC32_t calc_crc( Dir::File& file )
+	static CRC32_t calcCrc( Dir::File& file )
 	{
 		CRC32_t crc;
 		CRC32_Init( crc );
@@ -949,7 +1026,7 @@ private:
 static const wchar_t kOsPathSepar = WCHAR_PATH_SEPARATOR;
 static const wchar_t kUnixPathSepar = L'/';
 
-void ReplaceSlashes_OsToUnix( UString& name )
+static void ReplaceSlashes_OsToUnix( UString& name )
 {
 	name.Replace( kOsPathSepar, kUnixPathSepar );
 }
@@ -964,6 +1041,12 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 		if ( !callback )
 			return E_FAIL;
 
+		CMyComPtr<IArchiveUpdateCallback2> callback2;
+		RINOK( callback->QueryInterface( IID_IArchiveUpdateCallback2, (void**)&callback2 ) );
+		UInt64 volSize = 0;
+		callback2->GetVolumeSize( 0, &volSize );
+
+		UInt64 totalSize = 0;
 		VpkWriter writer;
 		for ( UInt32 i = 0; i < numItems; i++ )
 		{
@@ -987,6 +1070,10 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 				return E_INVALIDARG;
 			UInt64 size = prop.uhVal.QuadPart;
 
+			totalSize += size;
+			if ( !volSize && totalSize > INT32_MAX ) // 2GB max non-chunked
+				return E_OUTOFMEMORY;
+
 			CMyComPtr<ISequentialInStream> fileInStream;
 			RINOK( callback->GetStream( i, &fileInStream ) );
 			if ( !fileInStream )
@@ -1000,7 +1087,7 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 			RINOK( writer.addItem( UnicodeStringToMultiByte( name ), static_cast<UInt32>( size ), inStream ) );
 		}
 
-		RINOK( writer.write_pak( outStream, callback ) );
+		RINOK( writer.writePak( outStream, callback2, volSize ) );
 
 		RINOK( callback->SetOperationResult( NArchive::NExtract::NOperationResult::kOK ) );
 
@@ -1010,6 +1097,22 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 
 STDMETHODIMP CHandler::SetProperties( const wchar_t* const* names, const PROPVARIANT* values, UInt32 numProps )
 {
+	return S_OK;
+}
+
+STDMETHODIMP CHandler::GetMultiArchiveNameFmt( PROPVARIANT* nameMod, PROPVARIANT* prefix, PROPVARIANT* postfix, BOOL* numberAfterExt, UInt32* digitCount )
+{
+	NWindows::NCOM::CPropVariant prop;
+	prop = "_";
+	prop.Detach( prefix );
+	UString name = nameMod->bstrVal;
+	auto end = name.Len();
+	if ( end > 4 && name[end - 1] == L'r' && name[end - 2] == L'i' && name[end - 3] == L'd' && name[end - 4] == L'_' )
+		name.DeleteFrom( end - 4 );
+	prop = name;
+	prop.Detach( nameMod );
+	*numberAfterExt = FALSE;
+	*digitCount = 3;
 	return S_OK;
 }
 
@@ -1037,5 +1140,5 @@ REGISTER_ARC_IO(
 	k_Signature,
 	0,
 	NArcInfoFlags::kMultiSignature | NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen,
-	IsArc_Vpk
+	IsArc_Vpk, 1
 )

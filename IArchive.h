@@ -487,6 +487,11 @@ ARCHIVE_INTERFACE(IOutArchive, 0xA0)
   INTERFACE_IOutArchive(PURE)
 };
 
+ARCHIVE_INTERFACE(IMultiVolumeOutArchive, 0xFF)
+{
+  STDMETHOD(GetMultiArchiveNameFmt)(PROPVARIANT* nameMod, PROPVARIANT* prefix, PROPVARIANT* postfix, BOOL* numberAfterExt, UInt32* digitCount) PURE;
+};
+
 
 /*
 ISetProperties::SetProperties()

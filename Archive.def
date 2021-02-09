@@ -5,6 +5,7 @@ EXPORTS
   GetNumberOfFormats PRIVATE
   GetHandlerProperty2 PRIVATE
   GetIsArc PRIVATE
+  GetFormatLevelMask PRIVATE
 
   SetCodecs PRIVATE
 
