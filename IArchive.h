@@ -34,6 +34,7 @@ namespace NArcInfoFlags
   const UInt32 kPreArc          = 1 << 9;  // such archive can be stored before real archive (like SFX stub)
   const UInt32 kSymLinks        = 1 << 10; // the handler supports symbolic links
   const UInt32 kHardLinks       = 1 << 11; // the handler supports hard links
+  const UInt32 kByExtOnlyOpen   = 1 << 12; // call handler only if file extension matches
 }
 
 namespace NArchive

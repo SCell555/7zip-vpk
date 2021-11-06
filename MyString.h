@@ -217,21 +217,21 @@ bool StringsAreEqualNoCase_Ascii(const wchar_t *s1, const wchar_t *s2) throw();
 
 
 #define FORBID_STRING_OPS_2(cls, t) \
-  void Find(t) const; \
-  void Find(t, unsigned startIndex) const; \
-  void ReverseFind(t) const; \
-  void InsertAtFront(t); \
-  void RemoveChar(t); \
-  void Replace(t, t); \
+  void Find(t) const = delete; \
+  void Find(t, unsigned startIndex) const = delete; \
+  void ReverseFind(t) const = delete; \
+  void InsertAtFront(t) = delete; \
+  void RemoveChar(t) = delete; \
+  void Replace(t, t) = delete; \
 
 #define FORBID_STRING_OPS(cls, t) \
-  explicit cls(t); \
-  explicit cls(const t *); \
-  cls &operator=(t); \
-  cls &operator=(const t *); \
-  cls &operator+=(t); \
-  cls &operator+=(const t *); \
-  FORBID_STRING_OPS_2(cls, t); \
+  explicit cls(t) = delete; \
+  explicit cls(const t *) = delete; \
+  cls &operator=(t) = delete; \
+  cls &operator=(const t *) = delete; \
+  cls &operator+=(t) = delete; \
+  cls &operator+=(const t *) = delete; \
+  FORBID_STRING_OPS_2(cls, t) \
 
 /*
   cls &operator+(t); \

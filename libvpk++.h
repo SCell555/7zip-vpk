@@ -1,10 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
-#include <cstdint>
+#include <vector>
 
-#include "flat_map.hpp"
+#include "tuple.hpp"
 #include "IStream.h"
 #include "StreamUtils.h"
 
@@ -79,7 +80,7 @@ namespace libvpk
 		uint32_t crc;
 	};
 
-	using VPKFileMap = chobo::flat_map<std::string, VPKFileDesc>;
+	using VPKFileList = std::vector<tuplet::pair<std::string, VPKFileDesc>>;
 
 	class VPKSet : private helpers::NonCopyable
 	{
@@ -107,9 +108,19 @@ namespace libvpk
 			else
 				return S_FALSE;
 
+			RINOK( stream->Seek( pos, STREAM_SEEK_SET, nullptr ) );
+			CMyComPtr<CLimitedCachedInStream> bufStream = new CLimitedCachedInStream();
+			const auto size = m_header.treeSize + ( initialHeader.version == 2 ? sizeof( meta::VPKHeader2 ) : sizeof( meta::VPKHeader1 ) );
+			bufStream->Buffer.Alloc( size );
+			RINOK( ReadStream_FALSE( stream, bufStream->Buffer, size ) );
+			bufStream->SetStream( stream, 0 );
+			bufStream->SetCache( size, 0 );
+			bufStream->InitAndSeek( 0, size );
+			RINOK( bufStream->Seek( initialHeader.version == 2 ? sizeof( meta::VPKHeader2 ) : sizeof( meta::VPKHeader1 ), STREAM_SEEK_SET, nullptr ) );
+
 			const UInt64 total = m_header.treeSize;
 			callback->SetTotal( nullptr, &total );
-			return parseDirectory( stream, callback );
+			return parseDirectory( bufStream, callback );
 		}
 
 		const meta::VPKHeader& header() const
@@ -117,7 +128,7 @@ namespace libvpk
 			return m_header;
 		}
 
-		const VPKFileMap& files() const
+		const VPKFileList& files() const
 		{
 			return m_files;
 		}
@@ -166,7 +177,7 @@ namespace libvpk
 						if ( extension != " "sv )
 							fullPath += '.' + extension;
 
-						RINOK( parseFile( stream, fullPath ) );
+						RINOK( parseFile( stream, std::move( fullPath ) ) );
 					}
 				}
 			}
@@ -174,7 +185,7 @@ namespace libvpk
 			return S_OK;
 		}
 
-		HRESULT parseFile( IInStream* stream, const std::string& vpkFilePath )
+		HRESULT parseFile( IInStream* stream, std::string vpkFilePath )
 		{
 			uint32_t crc = helpers::read<uint32_t>( stream );
 			uint16_t preloadBytes = helpers::read<uint16_t>( stream );
@@ -189,6 +200,7 @@ namespace libvpk
 
 			UInt64 pos;
 			RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
+
 			VPKFileDesc desc{ archiveIndex, preloadBytes, static_cast<uint32_t>( pos ), offset, length, crc };
 
 			// Skip over the preload section
@@ -198,11 +210,11 @@ namespace libvpk
 				desc.fileLength += desc.preloadLength;
 			}
 
-			m_files.emplace( vpkFilePath, desc );
+			m_files.emplace_back().assign( std::move( vpkFilePath ), desc );
 			return S_OK;
 		}
 
 		meta::VPKHeader m_header;
-		VPKFileMap m_files;
+		VPKFileList m_files;
 	};
 }

@@ -74,9 +74,6 @@
     <ClInclude Include="Defs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="flat_map.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="IArchive.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -138,6 +135,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RegisterCodec.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="robin_hood.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="StringConvert.h">
