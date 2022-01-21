@@ -305,14 +305,18 @@ STDMETHODIMP CLimitedCachedInStream::Read(void *data, UInt32 size, UInt32 *proce
   UInt64 newPos = _startOffset + _virtPos;
   UInt64 offsetInCache = newPos - _cachePhyPos;
   HRESULT res = S_OK;
+  UInt32 tmpSize = 0;
   if (newPos >= _cachePhyPos &&
-      offsetInCache <= _cacheSize &&
-      size <= _cacheSize - (size_t)offsetInCache)
+      offsetInCache <= _cacheSize)
   {
     if (size != 0)
-      memcpy(data, _cache + (size_t)offsetInCache, size);
+    {
+      memcpy(data, _cache + (size_t)offsetInCache, min(size, _cacheSize - (size_t)offsetInCache));
+      tmpSize = (UInt32)min(_cacheSize - (size_t)offsetInCache, size);
+      size -= tmpSize;
+    }
   }
-  else
+  if (size != 0)
   {
     newPos += _physOffset;
     if (newPos != _physPos)
@@ -320,12 +324,12 @@ STDMETHODIMP CLimitedCachedInStream::Read(void *data, UInt32 size, UInt32 *proce
       _physPos = newPos;
       RINOK(SeekToPhys());
     }
-    res = _stream->Read(data, size, &size);
+    res = _stream->Read((char*)data + tmpSize, size, &size);
     _physPos += size;
   }
   if (processedSize)
-    *processedSize = size;
-  _virtPos += size;
+    *processedSize = size + tmpSize;
+  _virtPos += size + tmpSize;
   return res;
 }
 

@@ -1,5 +1,4 @@
 
-
 #define INITGUID
 #include "Alloc.h"
 #include "ComTry.h"
