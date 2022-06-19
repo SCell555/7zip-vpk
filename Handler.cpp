@@ -21,6 +21,9 @@ class CHandler :
 	public IOutArchive, public ISetProperties, public IMultiVolumeOutArchive, // writing
 	public CMyUnknownImp
 {
+public:
+	CHandler( bool writeV1 = false ) : writeV1( writeV1 ) {}
+
 	MY_UNKNOWN_IMP5( IInArchive, IInArchiveGetStream, IOutArchive, ISetProperties, IMultiVolumeOutArchive )
 	INTERFACE_IInArchive( override )
 	INTERFACE_IOutArchive( override )
@@ -30,6 +33,7 @@ class CHandler :
 	STDMETHOD( GetMultiArchiveNameFmt )( PROPVARIANT* nameMod, PROPVARIANT* prefix, PROPVARIANT* postfix, BOOL* numberAfterExt, UInt32* digitCount ) override;
 
 private:
+	const bool writeV1;
 	libvpk::VPKSet vpk;
 	CMyComPtr<IInStream> basePak;
 	CObjectVector<CMyComPtr<IInStream>> paks;
@@ -765,7 +769,7 @@ static constexpr std::string_view standardDirs[] =
 class VpkWriter
 {
 public:
-	VpkWriter() = default;
+	VpkWriter( bool writeV1 ) : writeV1( writeV1 ) {}
 
 	HRESULT addItem( AString internalPath, UInt32 size, IInStream* stream )
 	{
@@ -777,7 +781,7 @@ public:
 				return E_FAIL;
 		const auto extOffset = path.rfind( '.' );
 		const auto nameOffset = path.rfind( '/', extOffset );
-		const auto name = nameOffset != std::string_view::npos ? std::string{ path.substr( nameOffset + 1, extOffset - nameOffset - 1 ) } : std::string{ path.substr( 0, extOffset ) };
+		auto name = nameOffset != std::string_view::npos ? std::string{ path.substr( nameOffset + 1, extOffset - nameOffset - 1 ) } : std::string{ path.substr( 0, extOffset ) };
 		m_exts.try_emplace( extOffset != std::string_view::npos ? std::string{ path.substr(extOffset + 1) } : " "s ).
 			first->second.try_emplace( nameOffset != std::string_view::npos ? std::string{ path.substr(0, nameOffset) } : " "s ).
 				first->second.try_emplace( name.empty() ? " "s : std::move( name ), size, 0, stream );
@@ -817,7 +821,15 @@ public:
 			return E_OUTOFMEMORY;
 		RINOK( stream->Init( outStream, stream_ ) );
 
-		if ( m_needFixup == 1 )
+		const auto checkNeedFixup = [&]
+		{
+			for ( auto& ext : m_exts )
+				for ( auto& dir : ext.second )
+					if ( dir.first != m_lastDir )
+						return true;
+			return false;
+		};
+		if ( m_needFixup == 1 && checkNeedFixup() )
 		{
 			for ( auto &ext : m_exts )
 			{
@@ -882,7 +894,7 @@ public:
 		}
 		RINOK( write<std::string>( stream, {} ) );
 
-		RINOK( stream->Seek( treeSize + sizeof( libvpk::meta::VPKHeader ), STREAM_SEEK_SET, nullptr ) );
+		RINOK( stream->Seek( treeSize + ( writeV1 ? sizeof( libvpk::meta::VPKHeader1 ) : sizeof( libvpk::meta::VPKHeader2 ) ), STREAM_SEEK_SET, nullptr ) );
 
 		if ( !volSize )
 		{
@@ -947,9 +959,19 @@ private:
 		return stream->Write( string.c_str(), static_cast<UInt32>( string.size() + 1 ), nullptr );
 	}
 
-	static HRESULT writeHeader( IOutStream* stream, UInt32 size, UInt32 treeSize )
+	HRESULT writeHeader( IOutStream* stream, UInt32 size, UInt32 treeSize )
 	{
-		libvpk::meta::VPKHeader header;
+		if ( writeV1 )
+		{
+			libvpk::meta::VPKHeader1 header;
+			header.signature = libvpk::meta::VPKHeader::ValidSignature;
+			header.version = 1;
+			header.treeSize = static_cast<Int32>( treeSize );
+
+			return stream->Write( &header, sizeof( header ), nullptr );
+		}
+
+		libvpk::meta::VPKHeader2 header;
 		header.signature = libvpk::meta::VPKHeader::ValidSignature;
 		header.version = 2;
 		header.treeSize = static_cast<Int32>( treeSize );
@@ -984,6 +1006,7 @@ private:
 		return crc;
 	}
 
+	const bool writeV1;
 	robin_hood::unordered_node_map<std::string, robin_hood::unordered_node_map<std::string, robin_hood::unordered_node_map<std::string, File>>> m_exts;
 	signed char m_needFixup = 0;
 	std::string m_lastDir;
@@ -1013,7 +1036,7 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 		callback2->GetVolumeSize( 0, &volSize );
 
 		UInt64 totalSize = 0;
-		VpkWriter writer;
+		VpkWriter writer( writeV1 );
 		for ( UInt32 i = 0; i < numItems; i++ )
 		{
 			NWindows::NCOM::CPropVariant prop;
@@ -1103,6 +1126,21 @@ API_FUNC_IsArc IsArc_Vpk( const Byte* p, size_t size )
 
 REGISTER_ARC_IO(
 	"VPK", "vpk", 0, 1,
+	k_Signature,
+	0,
+	NArcInfoFlags::kMultiSignature | NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen | NArcInfoFlags::kByExtOnlyOpen,
+	IsArc_Vpk, 1
+)
+
+#define REGISTER_ARC_IO2(n, e, ae, id, sig, offs, flags, isArc, mask) \
+  static IInArchive *CreateArc2() { return new CHandler( true ); } \
+  static IOutArchive *CreateArcOut2() { return new CHandler( true ); } \
+  static const CArcInfo g_ArcInfo2 = { flags, id, ARRAYSIZE(sig), offs, mask, sig, n, e, ae, CreateArc2, CreateArcOut2, isArc } ; \
+  struct CRegisterArc2 { CRegisterArc2() { RegisterArc(&g_ArcInfo2); }}; \
+  static CRegisterArc2 g_RegisterArc2;
+
+REGISTER_ARC_IO2(
+	"VPKv1", "vpk", 0, 2,
 	k_Signature,
 	0,
 	NArcInfoFlags::kMultiSignature | NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen | NArcInfoFlags::kByExtOnlyOpen,
