@@ -69,15 +69,19 @@ namespace libvpk
 
 	struct VPKFileDesc
 	{
-		uint16_t archiveIdx;
-
 		uint16_t preloadLength;
 		uint32_t preloadOffset;
-
-		uint32_t fileOffset;
-		uint32_t fileLength;
-
 		uint32_t crc;
+		uint64_t totalFileLength;
+
+		struct VPKFilePart
+		{
+			uint16_t archiveIdx;
+			uint32_t fileOffset;
+			uint32_t fileLength;
+		};
+
+		std::vector<VPKFilePart> parts;
 	};
 
 	using VPKFileList = std::vector<tuplet::pair<std::string, VPKFileDesc>>;
@@ -189,28 +193,33 @@ namespace libvpk
 		{
 			uint32_t crc = helpers::read<uint32_t>( stream );
 			uint16_t preloadBytes = helpers::read<uint16_t>( stream );
-			uint16_t archiveIndex = helpers::read<uint16_t>( stream );
 
-			uint32_t offset = helpers::read<uint32_t>( stream );
-			uint32_t length = helpers::read<uint32_t>( stream );
+			VPKFileDesc desc{ preloadBytes, 0, crc, 0 };
 
-			// Read the terminator for the file info.
-			if ( helpers::read<uint16_t>( stream ) != 0xFFFF )
-				return S_FALSE;
+			while ( true )
+			{
+				uint16_t archiveIndex = helpers::read<uint16_t>( stream );
+				if ( archiveIndex == 0xFFFF )
+					break;
+				uint32_t offset = helpers::read<uint32_t>( stream );
+				uint32_t length = helpers::read<uint32_t>( stream );
+
+				desc.parts.emplace_back( archiveIndex, offset, length );
+				desc.totalFileLength += length;
+			}
 
 			UInt64 pos;
 			RINOK( stream->Seek( 0, STREAM_SEEK_CUR, &pos ) );
-
-			VPKFileDesc desc{ archiveIndex, preloadBytes, static_cast<uint32_t>( pos ), offset, length, crc };
+			desc.preloadOffset = static_cast<UInt32>( pos );
 
 			// Skip over the preload section
 			if ( desc.preloadLength != 0 )
 			{
 				RINOK( stream->Seek( desc.preloadLength, STREAM_SEEK_CUR, nullptr ) );
-				desc.fileLength += desc.preloadLength;
+				desc.totalFileLength += desc.preloadLength;
 			}
 
-			m_files.emplace_back().assign( std::move( vpkFilePath ), desc );
+			m_files.emplace_back().assign( std::move( vpkFilePath ), std::move( desc ) );
 			return S_OK;
 		}
 

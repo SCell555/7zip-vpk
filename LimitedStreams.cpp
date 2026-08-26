@@ -84,6 +84,79 @@ HRESULT CreateLimitedInStream(IInStream *inStream, UInt64 pos, UInt64 size, ISeq
   return S_OK;
 }
 
+STDMETHODIMP CLimitedInStreamMulti::Read(void *data, UInt32 size, UInt32 *processedSize)
+{
+  if (processedSize)
+    *processedSize = 0;
+  if (_virtPos >= _size)
+  {
+    // 9.31: Fixed. Windows doesn't return error in ReadFile and IStream->Read in that case.
+    return S_OK;
+    // return (_virtPos == _size) ? S_OK: E_FAIL; // ERROR_HANDLE_EOF
+  }
+  {
+    const UInt64 rem = _size - _virtPos;
+    if (size > rem)
+      size = (UInt32)rem;
+  }
+
+  bool reSeek = false;
+  {
+  recheck:
+    auto& s = _subStreams[_currentSubStream];
+    if ( s._sizeUntilNow > _virtPos && _currentSubStream )
+    {
+      --_currentSubStream;
+      reSeek = true;
+      goto recheck;
+    }
+    else if ( _virtPos >= s._sizeUntilNow + s._streamSize && _currentSubStream != _subStreams.Size() - 1 )
+    {
+      ++_currentSubStream;
+      reSeek = true;
+      goto recheck;
+    }
+  }
+
+  if (reSeek)
+  {
+    RINOK(SeekToPhys(_virtPos - _subStreams[_currentSubStream]._sizeUntilNow));
+  }
+
+  UInt32 canRead = size;
+  auto& s = _subStreams[_currentSubStream];
+  if ( auto lim = s._streamSize - ( _virtPos - s._sizeUntilNow ); canRead > lim )
+      canRead = lim;
+
+  UInt32 processed;
+  RINOK( s._stream->Read(data, canRead, &processed) );
+  if (processedSize)
+    *processedSize += processed;
+  _virtPos += processed;
+  size -= canRead;
+  if ( size )
+      goto recheck;
+
+  return S_OK;
+}
+
+STDMETHODIMP CLimitedInStreamMulti::Seek(Int64 offset, UInt32 seekOrigin, UInt64 *newPosition)
+{
+  switch (seekOrigin)
+  {
+     case STREAM_SEEK_SET: break;
+     case STREAM_SEEK_CUR: offset += _virtPos; break;
+     case STREAM_SEEK_END: offset += _size; break;
+     default: return STG_E_INVALIDFUNCTION;
+  }
+  if (offset < 0)
+    return HRESULT_WIN32_ERROR_NEGATIVE_SEEK;
+  _virtPos = offset;
+  if (newPosition)
+    *newPosition = _virtPos;
+  return S_OK;
+}
+
 STDMETHODIMP CClusterInStream::Read(void *data, UInt32 size, UInt32 *processedSize)
 {
   if (processedSize)

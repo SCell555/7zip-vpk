@@ -15,6 +15,8 @@
 #include "robin_hood.h"
 #include <cwchar>
 
+namespace VPK
+{
 
 class CHandler :
 	public IInArchive, public IInArchiveGetStream, // reading
@@ -53,11 +55,12 @@ STDMETHODIMP CHandler::Open( IInStream* inStream, const UInt64* maxCheckStartPos
 		for ( size_t i = 0; i < f.size(); i++ )
 		{
 			const auto& file = f[i].second;
-			if ( const auto arc = file.archiveIdx; arc != 0x7FFF && arc > largestId )
-				largestId = arc;
+			for ( const auto &p : file.parts )
+				if ( const auto arc = p.archiveIdx; arc != 0x7FFF && arc > largestId )
+					largestId = arc;
 			if ( const auto preload = file.preloadLength; preload > preloadSize )
 				preloadSize = preload;
-			s += file.fileLength;
+			s += file.totalFileLength;
 		}
 
 		size = s;
@@ -213,7 +216,7 @@ STDMETHODIMP CHandler::GetProperty( UInt32 index, PROPID propID, PROPVARIANT* va
 			break;
 		case kpidSize:
 		case kpidPackSize:
-			prop = static_cast<UInt64>( item.fileLength );
+			prop = static_cast<UInt64>( item.totalFileLength );
 			break;
 
 		case kpidCRC:
@@ -221,12 +224,13 @@ STDMETHODIMP CHandler::GetProperty( UInt32 index, PROPID propID, PROPVARIANT* va
 			break;
 
 		case kpidVolume:
-			if ( item.archiveIdx != 0x7FFF )
-				prop = static_cast<UInt32>( item.archiveIdx );
+			if ( !item.parts.empty() && item.parts.front().archiveIdx != 0x7FFF )
+				prop = static_cast<UInt32>( item.parts.front().archiveIdx );
 			break;
 
 		case kpidOffset:
-			prop = static_cast<UInt32>( item.fileOffset );
+			if ( !item.parts.empty() )
+				prop = static_cast<UInt32>( item.parts.front().fileOffset );
 			break;
 
 		default:
@@ -249,7 +253,7 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 		if ( !allFilesMode )
 		{
 			for ( UInt32 i = 0; i < numItems; i++ )
-				totalSize += f[indices[i]].second.fileLength;
+				totalSize += f[indices[i]].second.totalFileLength;
 		}
 
 		RINOK( extractCallback->SetTotal( totalSize ) );
@@ -272,12 +276,12 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 			RINOK( extractCallback->GetStream( index, &realOutStream, askMode ) );
 
 			const auto& item = f[index].second;
-			currentTotalSize += item.fileLength;
+			currentTotalSize += item.totalFileLength;
 
 			if ( !testMode && !realOutStream )
 				continue;
 
-			if ( !item.fileLength )
+			if ( !item.totalFileLength )
 			{
 				RINOK( extractCallback->PrepareOperation( askMode ) );
 				realOutStream->Write( "", 0, nullptr );
@@ -285,18 +289,26 @@ STDMETHODIMP CHandler::Extract( const UInt32* indices, UInt32 numItems, Int32 te
 				continue;
 			}
 
-			if ( missingFiles && !paks[item.archiveIdx] )
+			bool skip = false;
+			for ( const auto& p : item.parts )
 			{
-				RINOK( extractCallback->PrepareOperation( askMode ) );
-				realOutStream.Release();
-				RINOK( extractCallback->SetOperationResult( NArchive::NExtract::NOperationResult::kUnavailable ) );
-				continue;
+				if ( missingFiles && !paks[p.archiveIdx] )
+				{
+					RINOK( extractCallback->PrepareOperation( askMode ) );
+					realOutStream.Release();
+					RINOK( extractCallback->SetOperationResult( NArchive::NExtract::NOperationResult::kUnavailable ) );
+					skip = true;
+					break;
+				}
 			}
+
+			if ( skip )
+				continue;
 
 			RINOK( extractCallback->PrepareOperation( askMode ) );
 			outStream->SetStream( realOutStream );
 			realOutStream.Release();
-			outStream->Init( item.fileLength );
+			outStream->Init( item.totalFileLength );
 			Int32 opRes;
 			CMyComPtr<ISequentialInStream> inStream;
 			HRESULT res = GetStream( index, &inStream );
@@ -321,10 +333,7 @@ STDMETHODIMP CHandler::GetStream( UInt32 index, ISequentialInStream** stream )
 	*stream = nullptr;
 	const auto& i = vpk.files().at( index ).second;
 
-	if ( missingFiles && !paks[i.archiveIdx] )
-		return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
-
-	if ( !i.fileLength )
+	if ( !i.totalFileLength )
 	{
 		*stream = new CEmptyInStream();
 		( *stream )->AddRef();
@@ -332,12 +341,54 @@ STDMETHODIMP CHandler::GetStream( UInt32 index, ISequentialInStream** stream )
 	}
 
 	const auto& h = vpk.header();
-	const auto offset = i.fileOffset + ( i.archiveIdx != 0x7FFF ? 0 : h.treeSize + ( h.version == 1 ? sizeof( libvpk::meta::VPKHeader1 ) : sizeof( libvpk::meta::VPKHeader ) ) );
 	if ( i.preloadLength == 0 )
-		return CreateLimitedInStream( i.archiveIdx == 0x7FFF ? basePak : paks[i.archiveIdx], offset, i.fileLength, stream );
+	{
+		if ( i.parts.size() == 1 )
+		{
+			auto& f = i.parts.front();
+			if ( missingFiles && !paks[f.archiveIdx] )
+				return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+
+			const auto offset = f.fileOffset + ( f.archiveIdx != 0x7FFF ? 0 : h.treeSize + ( h.version == 1 ? sizeof( libvpk::meta::VPKHeader1 ) : sizeof( libvpk::meta::VPKHeader ) ) );
+			return CreateLimitedInStream( f.archiveIdx == 0x7FFF ? basePak : paks[f.archiveIdx], offset, f.fileLength, stream );
+		}
+
+		CLimitedInStreamMulti* streamSpec = new CLimitedInStreamMulti;
+		CMyComPtr<ISequentialInStream> streamTemp = streamSpec;
+		for ( auto& p : i.parts )
+		{
+			if ( missingFiles && !paks[p.archiveIdx] )
+				return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+			streamSpec->AddStream( paks[p.archiveIdx], p.fileOffset, p.fileLength );
+		}
+		RINOK( streamSpec->InitAndSeek( i.totalFileLength ) );
+		streamSpec->SeekToStart();
+		*stream = streamTemp.Detach();
+		return S_OK;
+	}
 
 	CMyComPtr<CLimitedCachedInStream> limitedStream = new CLimitedCachedInStream;
-	limitedStream->SetStream( i.archiveIdx == 0x7FFF ? basePak : paks[i.archiveIdx], offset );
+
+	if ( i.parts.size() == 1 )
+	{
+		auto& f = i.parts.front();
+		const auto offset = f.fileOffset + ( f.archiveIdx != 0x7FFF ? 0 : h.treeSize + ( h.version == 1 ? sizeof( libvpk::meta::VPKHeader1 ) : sizeof( libvpk::meta::VPKHeader ) ) );
+		limitedStream->SetStream( f.archiveIdx == 0x7FFF ? basePak : paks[f.archiveIdx], offset );
+	}
+	else
+	{
+		CLimitedInStreamMulti* streamSpec = new CLimitedInStreamMulti;
+		CMyComPtr<ISequentialInStream> streamTemp = streamSpec;
+		for ( auto& p : i.parts )
+		{
+			if ( missingFiles && !paks[p.archiveIdx] )
+				return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+			streamSpec->AddStream( paks[p.archiveIdx], p.fileOffset, p.fileLength );
+		}
+		RINOK( streamSpec->InitAndSeek( i.totalFileLength ) );
+		streamSpec->SeekToStart();
+		limitedStream->SetStream( streamSpec, 0 );
+	}
 
 	auto& preload = limitedStream->Buffer;
 	preload.Alloc( i.preloadLength );
@@ -346,7 +397,7 @@ STDMETHODIMP CHandler::GetStream( UInt32 index, ISequentialInStream** stream )
 	RINOK( ReadStream_FAIL( basePak, preload, i.preloadLength ) );
 
 	limitedStream->SetCache( i.preloadLength, 0 );
-	RINOK( limitedStream->InitAndSeek( 0, i.fileLength ) );
+	RINOK( limitedStream->InitAndSeek( 0, i.totalFileLength ) );
 	*stream = limitedStream.Detach();
 	return S_OK;
 }
@@ -763,7 +814,7 @@ static constexpr std::string_view bannedExts[] =
 
 static constexpr std::string_view standardDirs[] =
 {
-	"cfg", "expressions", "maps", "materials", "media", "missions", "models", "panorama", "particles", "resource", "scenes", "scripts", "sound"
+	"cfg", "expressions", "maps", "materials", "media", "missions", "models", "panorama", "particles", "resource", "scenes", "scripts", "shaders", "sound"
 };
 
 class VpkWriter
@@ -771,7 +822,7 @@ class VpkWriter
 public:
 	VpkWriter( bool writeV1 ) : writeV1( writeV1 ) {}
 
-	HRESULT addItem( AString internalPath, UInt32 size, IInStream* stream )
+	HRESULT addItem( AString internalPath, UInt64 size, IInStream* stream )
 	{
 		using namespace std::string_literals;
 		internalPath.MakeLower_Ascii();
@@ -784,7 +835,7 @@ public:
 		auto name = nameOffset != std::string_view::npos ? std::string{ path.substr( nameOffset + 1, extOffset - nameOffset - 1 ) } : std::string{ path.substr( 0, extOffset ) };
 		m_exts.try_emplace( extOffset != std::string_view::npos ? std::string{ path.substr(extOffset + 1) } : " "s ).
 			first->second.try_emplace( nameOffset != std::string_view::npos ? std::string{ path.substr(0, nameOffset) } : " "s ).
-				first->second.try_emplace( name.empty() ? " "s : std::move( name ), size, 0, stream );
+				first->second.try_emplace( name.empty() ? " "s : std::move( name ), size, stream );
 		if ( m_needFixup != 2 )
 		{
 			if ( const auto firstSep = path.find( '/' ); firstSep != std::string_view::npos )
@@ -850,7 +901,8 @@ public:
 				treeSize += static_cast<UInt32>( dir.first.size() + 2 ); // +1 string null, +1 last null terminator
 				for ( auto& file : dir.second )
 				{
-					treeSize += static_cast<UInt32>( file.first.size() + 1 + vpkMetaSize );
+					treeSize += static_cast<UInt32>( file.first.size() + 1 + sizeof( Int32 ) + sizeof( Int16 ) * 2 );
+					treeSize += ( !volSize ? 1 : ( file.second.size + volSize - 1 ) / volSize ) * ( sizeof( Int16 ) + 2 * sizeof( Int32 ) );
 					size += file.second.size;
 				}
 			}
@@ -860,6 +912,15 @@ public:
 
 		UInt16 curPak = volSize > 0 ? 0 : 0x7FFF;
 		UInt32 currentOffset = 0;
+		const auto checkOffset = [&]( UInt64 size )
+		{
+			if ( volSize && currentOffset + size > volSize )
+			{
+				currentOffset = 0;
+				++curPak;
+			}
+		};
+
 		for ( auto& ext : m_exts )
 		{
 			RINOK( write( stream, ext.first ) );
@@ -875,18 +936,35 @@ public:
 					RINOK( write( stream, file.first ) );
 					RINOK( write<UInt32>( stream, calcCrc( file.second ) ) );
 					RINOK( write<UInt16>( stream, 0 ) );
-					RINOK( write<UInt16>( stream, curPak ) );
-					RINOK( write<UInt32>( stream, currentOffset ) );
-					RINOK( write<UInt32>( stream, file.second.size ) );
+
+					UInt64 size = file.second.size;
+					while ( volSize && size > volSize )
+					{
+						checkOffset( volSize );
+
+						RINOK( write<UInt16>( stream, curPak ) );
+						RINOK( write<UInt32>( stream, currentOffset ) );
+						RINOK( write<UInt32>( stream, volSize ) );
+						currentOffset += volSize;
+						size -= volSize;
+
+						file.second.paks.Add( curPak );
+					}
+
+					checkOffset( size );
+
+					if ( size )
+					{
+						RINOK( write<UInt16>( stream, curPak ) );
+						RINOK( write<UInt32>( stream, currentOffset ) );
+						RINOK( write<UInt32>( stream, size ) );
+					}
+
 					RINOK( write<UInt16>( stream, 0xFFFF ) );
 					currentOffset += file.second.size;
-					file.second.pak = curPak;
+					file.second.paks.Add( curPak );
 
-					if ( volSize && currentOffset > volSize )
-					{
-						currentOffset = 0;
-						++curPak;
-					}
+					checkOffset( 0 );
 				}
 				RINOK( write<std::string>( stream, {} ) );
 			}
@@ -925,17 +1003,30 @@ public:
 				{
 					for ( auto& file : dir.second )
 					{
-						if ( lastPak != file.second.pak )
+						FOR_VECTOR( i, file.second.paks )
 						{
-							lastPak = file.second.pak;
-							pakStream.Release();
-							RINOK( callback->GetVolumeStream( static_cast<UInt32>( lastPak - 1 ), &pakStream ) );
+							auto pak = file.second.paks[i];
+							if ( lastPak != pak )
+							{
+								lastPak = pak;
+								pakStream.Release();
+								RINOK( callback->GetVolumeStream( static_cast<UInt32>( lastPak - 1 ), &pakStream ) );
+							}
+
+							UInt64 copySize = file.second.size;
+							if ( file.second.size > volSize )
+							{
+								if ( i == file.second.paks.Size() - 1 )
+									copySize %= volSize;
+								else
+									copySize = volSize;
+							}
+							progress->InSize = progress->OutSize = written;
+							written += copySize;
+							RINOK( progress->SetCur() );
+							RINOK( copyCoder->Code( file.second.stream, pakStream, nullptr, &copySize, progress ) );
 						}
 
-						progress->InSize = progress->OutSize = written;
-						written += file.second.size;
-						RINOK( progress->SetCur() );
-						RINOK( copyCoder->Code( file.second.stream, pakStream, nullptr, nullptr, progress ) );
 						file.second.stream.Release();
 					}
 				}
@@ -982,9 +1073,9 @@ private:
 
 	struct File
 	{
-		UInt32 size = 0;
-		UInt16 pak = 0;
+		UInt64 size = 0;
 		CMyComPtr<IInStream> stream;
+		CRecordVector<UInt16> paks;
 	};
 
 	static CRC32_t calcCrc( File& file )
@@ -1073,7 +1164,7 @@ STDMETHODIMP CHandler::UpdateItems( ISequentialOutStream* outStream, UInt32 numI
 			if ( !inStream )
 				return E_FAIL;
 
-			RINOK( writer.addItem( UnicodeStringToMultiByte( name ), static_cast<UInt32>( size ), inStream ) );
+			RINOK( writer.addItem( UnicodeStringToMultiByte( name ), size, inStream ) );
 		}
 
 		RINOK( writer.writePak( outStream, callback2, volSize ) );
@@ -1108,17 +1199,21 @@ STDMETHODIMP CHandler::GetMultiArchiveNameFmt( PROPVARIANT* nameMod, PROPVARIANT
 
 
 static constexpr const Byte k_Signature[] = {
-	8, 0x34, 0x12, 0xaa, 0x55, 0x1, 0x0, 0x0, 0x0,	// V1
-	8, 0x34, 0x12, 0xaa, 0x55, 0x2, 0x0, 0x0, 0x0	// V2
+	0x34, 0x12, 0xaa, 0x55, 0x2, 0x0, 0x0, 0x0	// V2
 };
 
-API_FUNC_IsArc IsArc_Vpk( const Byte* p, size_t size )
+static constexpr const Byte k_SignatureV1[] = {
+	0x34, 0x12, 0xaa, 0x55, 0x1, 0x0, 0x0, 0x0,	// V1
+};
+
+template <int v>
+UInt32 WINAPI IsArc_Vpk( const Byte* p, size_t size )
 {
 	if ( size < 8 )
 		return k_IsArc_Res_NEED_MORE;
 
 	const auto ver = *reinterpret_cast<const UInt32*>( p + 4 );
-	if ( ver == 0 || ver > 2 )
+	if ( ver == 0 || ver != v )
 		return k_IsArc_Res_NO;
 
 	return k_IsArc_Res_YES;
@@ -1128,8 +1223,8 @@ REGISTER_ARC_IO(
 	"VPK", "vpk", 0, 1,
 	k_Signature,
 	0,
-	NArcInfoFlags::kMultiSignature | NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen | NArcInfoFlags::kByExtOnlyOpen,
-	IsArc_Vpk, 1
+	NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen | NArcInfoFlags::kByExtOnlyOpen,
+	IsArc_Vpk<2>, 1
 )
 
 #define REGISTER_ARC_IO2(n, e, ae, id, sig, offs, flags, isArc, mask) \
@@ -1141,8 +1236,10 @@ REGISTER_ARC_IO(
 
 REGISTER_ARC_IO2(
 	"VPKv1", "vpk", 0, 2,
-	k_Signature,
+	k_SignatureV1,
 	0,
-	NArcInfoFlags::kMultiSignature | NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen | NArcInfoFlags::kByExtOnlyOpen,
-	IsArc_Vpk, 1
+	NArcInfoFlags::kUseGlobalOffset | NArcInfoFlags::kPureStartOpen | NArcInfoFlags::kByExtOnlyOpen,
+	IsArc_Vpk<1>, 1
 )
+
+}

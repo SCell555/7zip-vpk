@@ -64,6 +64,55 @@ public:
   HRESULT SeekToStart() { return Seek(0, STREAM_SEEK_SET, NULL); }
 };
 
+
+class CLimitedInStreamMulti:
+  public IInStream,
+  public CMyUnknownImp
+{
+  struct SubStream
+  {
+    CMyComPtr<IInStream> _stream;
+    UInt64 _streamStart;
+    UInt64 _streamSize;
+    UInt64 _sizeUntilNow;
+  };
+  CObjectVector<SubStream> _subStreams;
+  UInt32 _currentSubStream;
+  UInt64 _virtPos;
+  UInt64 _size;
+
+  HRESULT SeekToPhys(UInt64 pos) { auto& s = _subStreams[_currentSubStream]; return s._stream->Seek( s._streamStart + pos, STREAM_SEEK_SET, NULL ); }
+public:
+  void AddStream(IInStream *stream, UInt64 start, UInt64 size)
+  {
+      auto& s = _subStreams.AddNew();
+      s._stream = stream;
+      s._streamStart = start;
+      s._streamSize = size;
+      s._sizeUntilNow = 0;
+      if ( _subStreams.Size() > 1 )
+      {
+          auto& p = _subStreams[_subStreams.Size() - 2];
+          s._sizeUntilNow = p._sizeUntilNow + p._streamSize;
+      }
+  }
+
+  HRESULT InitAndSeek(UInt64 size)
+  {
+    _virtPos = 0;
+    _size = size;
+    _currentSubStream = 0;
+    return SeekToPhys( 0 );
+  }
+
+  MY_UNKNOWN_IMP2(ISequentialInStream, IInStream)
+
+  STDMETHOD(Read)(void *data, UInt32 size, UInt32 *processedSize);
+  STDMETHOD(Seek)(Int64 offset, UInt32 seekOrigin, UInt64 *newPosition);
+
+  HRESULT SeekToStart() { return Seek(0, STREAM_SEEK_SET, NULL); }
+};
+
 HRESULT CreateLimitedInStream(IInStream *inStream, UInt64 pos, UInt64 size, ISequentialInStream **resStream);
 
 class CClusterInStream:
